@@ -1,0 +1,116 @@
+# AMCP Platform Services — domain microservices
+
+# Only the services that are actually implemented are wired up here. Run
+# alongside amcp-platform-core's core infra and amcp-ai-engine's inference
+# service:
+#
+#   docker-compose -f ../../amcp-platform-core/docker-compose.core.yaml \
+#                   -f ../../amcp-ai-engine/ai/inference/docker-compose.inference.yaml \
+#                   -f docker-compose.services.yaml up -d
+#
+# See each stub service's README.md for what's needed before it can be
+# added here.
+
+services:
+  threat-detection:
+    build:
+      context: .
+      dockerfile: services/cybersecurity/threat-detection/Dockerfile
+    container_name: cyber-threat-detection
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      PORT: "8000" # service.py defaults to a per-service dev port; compose/gateway expect 8000
+      NATS_URL: nats://nats:4222
+      INFERENCE_URL: http://inference:8000
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  phishing-detector:
+    build:
+      context: .
+      dockerfile: services/cybersecurity/phishing-detector/Dockerfile
+    container_name: cyber-phishing-detector
+    ports:
+      - "127.0.0.1:8003:8000"
+    environment:
+      PORT: "8000" # service.py defaults to a per-service dev port; compose/gateway expect 8000
+      NATS_URL: nats://nats:4222
+      INFERENCE_URL: http://inference:8000
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  fraud-detector:
+    build:
+      context: .
+      dockerfile: services/finance/fraud-detector/Dockerfile
+    container_name: fin-fraud-detector
+    ports:
+      - "127.0.0.1:8011:8000"
+    environment:
+      PORT: "8000" # service.py defaults to a per-service dev port; compose/gateway expect 8000
+      NATS_URL: nats://nats:4222
+      INFERENCE_URL: http://inference:8000
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  process-anomaly-detector:
+    build:
+      context: .
+      dockerfile: services/manufacturing/process-anomaly-detector/Dockerfile
+    container_name: mfg-process-anomaly-detector
+    ports:
+      - "127.0.0.1:8021:8000"
+    environment:
+      PORT: "8000" # service.py defaults to a per-service dev port; compose/gateway expect 8000
+      NATS_URL: nats://nats:4222
+      INFERENCE_URL: http://inference:8000
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    container_name: platform-gateway
+    ports:
+      # Only port mapped to 0.0.0.0 (i.e. reachable from outside the VM) --
+      # everything else in this file binds to 127.0.0.1 only. See the
+      # "public vs internal" note in the root docker-compose.yml.
+      - "8080:8080"
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      NATS_URL: nats://nats:4222
+      INFERENCE_URL: http://inference:8000
+      THREAT_DETECTION_URL: http://cyber-threat-detection:8000
+      PHISHING_DETECTOR_URL: http://cyber-phishing-detector:8000
+      FRAUD_DETECTOR_URL: http://fin-fraud-detector:8000
+      PROCESS_ANOMALY_DETECTOR_URL: http://mfg-process-anomaly-detector:8000
+      # Pulled from the root .env (docker compose auto-loads a .env file
+      # next to wherever `docker compose` is run from) -- see .env.example
+      # at the repo root.
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-0}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:4200}
+    depends_on:
+      - threat-detection
+      - phishing-detector
+      - fraud-detector
+      - process-anomaly-detector
+    networks:
+      - platform-network
+    restart: unless-stopped
+
+# NOTE: platform-network is declared (non-external) by the root
+# /docker-compose.yml, which pulls this file in via `include:`. Do not
+# redeclare it here with `external: true` — Compose's file-merging would
+# otherwise conflict with the root's definition of the same network name.
+networks:
+  platform-network: {}

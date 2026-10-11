@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Local artifacts
+mlruns/
+mlflow.db
+*.log
+.DS_Store
