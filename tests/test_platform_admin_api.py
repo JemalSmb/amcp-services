@@ -168,11 +168,42 @@ def test_toggle_automation_validation(client):
 # --- settings / profile (per user) -------------------------------------------------------------
 def test_settings_default_save_and_isolation(client):
     a, b = tok("alice"), tok("bob")
-    assert client.get("/settings", headers=a).json()["theme"] == "light"
+    assert client.get("/settings", headers=a).json()["theme"] == "system"
     saved = client.put("/settings", headers=a, json={"theme": "dark", "evil": 1}).json()
     assert saved["theme"] == "dark" and "evil" not in saved
     assert client.get("/settings", headers=a).json()["theme"] == "dark"
-    assert client.get("/settings", headers=b).json()["theme"] == "light"
+    assert client.get("/settings", headers=b).json()["theme"] == "system"
+
+
+@pytest.mark.parametrize("bad", [
+    {"theme": "neon"}, {"emailDigest": "hourly"}, {"alertSeverityThreshold": "urgent"},
+    {"emailAlerts": "yes"}, {"refreshIntervalSeconds": 1}, {"refreshIntervalSeconds": True},
+    {"notificationEmail": "not-an-email"},
+])
+def test_settings_rejects_invalid_values(client, bad):
+    assert client.put("/settings", headers=tok(), json=bad).status_code == 422
+
+
+def test_settings_new_fields_roundtrip(client):
+    h = tok()
+    body = {"notificationEmail": " ops@corp.io ", "emailDigest": "weekly", "browserNotifications": True,
+            "theme": "dark", "refreshIntervalSeconds": 60}
+    saved = client.put("/settings", headers=h, json=body).json()
+    assert saved["notificationEmail"] == "ops@corp.io"
+    assert client.get("/settings", headers=h).json() == saved
+
+
+def test_profile_update_name_and_timezone_only(client):
+    h = tok("u5", "sam@corp.io")
+    p = client.put("/profile", headers=h, json={"name": " Sam B ", "timezone": "Europe/Lisbon", "role": "Admin"}).json()
+    assert p["name"] == "Sam B" and p["timezone"] == "Europe/Lisbon"
+    assert p["role"] == "Analyst" and p["email"] == "sam@corp.io"
+    assert client.get("/profile", headers=h).json() == p
+
+
+@pytest.mark.parametrize("body", [{"name": "  ", "timezone": "UTC"}, {"name": "A", "timezone": "Mars/Base"}])
+def test_profile_update_validation(client, body):
+    assert client.put("/profile", headers=tok(), json=body).status_code == 422
 
 
 def test_profile_defaults_from_email(client):

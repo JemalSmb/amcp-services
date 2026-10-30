@@ -24,8 +24,10 @@ under /v1.
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import available_timezones
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
@@ -283,8 +285,38 @@ async def get_settings(user: Dict[str, Any] = Depends(require_auth)) -> Dict[str
     return {k: stored.get(k, v) for k, v in DEFAULT_SETTINGS.items()} if stored else dict(DEFAULT_SETTINGS)
 
 
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_SETTING_CHOICES = {
+    "theme": ("light", "dark", "system"),
+    "emailDigest": ("off", "daily", "weekly"),
+    "alertSeverityThreshold": _SEVERITIES,
+}
+_BOOL_SETTINGS = ("emailAlerts", "browserNotifications")
+
+
+def _validate_settings(incoming: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only known keys and reject bad values with a 422 naming the field."""
+    clean = {k: v for k, v in incoming.items() if k in DEFAULT_SETTINGS}
+    for key, choices in _SETTING_CHOICES.items():
+        if key in clean and clean[key] not in choices:
+            raise HTTPException(status_code=422, detail=f"{key} must be one of {', '.join(choices)}")
+    for key in _BOOL_SETTINGS:
+        if key in clean and not isinstance(clean[key], bool):
+            raise HTTPException(status_code=422, detail=f"{key} must be true or false")
+    if "refreshIntervalSeconds" in clean:
+        value = clean["refreshIntervalSeconds"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 5 <= value <= 3600:
+            raise HTTPException(status_code=422, detail="refreshIntervalSeconds must be between 5 and 3600")
+    if "notificationEmail" in clean:
+        email = clean["notificationEmail"]
+        if not isinstance(email, str) or len(email) > 254 or (email.strip() and not _EMAIL_RE.match(email.strip())):
+            raise HTTPException(status_code=422, detail="notificationEmail must be a valid email address")
+        clean["notificationEmail"] = email.strip()
+    return clean
+
+
 async def save_settings(settings: Dict[str, Any], user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
-    merged = {**DEFAULT_SETTINGS, **{k: v for k, v in settings.items() if k in DEFAULT_SETTINGS}}
+    merged = {**DEFAULT_SETTINGS, **_validate_settings(settings)}
     # `id` is required by record_store.get(); it is not part of AppSettings, so drop it on the way out.
     await record_store.put("settings", "settings", {"id": "settings", **merged}, owner=_user_key(user))
     return merged
@@ -300,6 +332,28 @@ async def get_profile(user: Dict[str, Any] = Depends(require_auth)) -> Dict[str,
         "role": stored.get("role") or "Analyst",
         "timezone": stored.get("timezone") or "UTC",
     }
+
+
+class ProfileUpdateBody(BaseModel):
+    name: str
+    timezone: str
+
+
+async def update_profile(body: ProfileUpdateBody, user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
+    name = body.name.strip()
+    if not name or len(name) > 100:
+        raise HTTPException(status_code=422, detail="name must be 1-100 characters")
+    if body.timezone != "UTC" and body.timezone not in available_timezones():
+        raise HTTPException(status_code=422, detail="timezone must be a valid IANA timezone, e.g. Europe/Lisbon")
+    stored = await record_store.get("profile", "profile", owner=_user_key(user)) or {}
+    # Role is assigned by an admin, never by the user -- only name and timezone are editable here.
+    await record_store.put(
+        "profile",
+        "profile",
+        {**stored, "id": "profile", "name": name, "timezone": body.timezone},
+        owner=_user_key(user),
+    )
+    return await get_profile(user)
 
 
 # --- Route table (unversioned + /v1) ------------------------------------------
@@ -318,6 +372,7 @@ _ROUTES = [
     ("/help-docs", list_help_docs, ["GET"]),
     ("/help-docs/{doc_id}", get_help_doc, ["GET"]),
     ("/profile", get_profile, ["GET"]),
+    ("/profile", update_profile, ["PUT"]),
     ("/settings", get_settings, ["GET"]),
     ("/settings", save_settings, ["PUT"]),
 ]

@@ -42,8 +42,11 @@ SEEDS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "theme": "light",
+    "theme": "system",
     "emailAlerts": True,
+    "notificationEmail": "",
+    "emailDigest": "off",
     "alertSeverityThreshold": "medium",
+    "browserNotifications": False,
     "refreshIntervalSeconds": 30,
 }
