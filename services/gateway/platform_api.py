@@ -10,13 +10,20 @@ Where the data comes from:
     (the same alerts served by /v1/alerts). Manual predictions made through
     POST /models/{id}/predict are stored too and merged into /predictions.
   - automations / investigations / assets / reports / notifications /
-    help-docs: record_store (Supabase), seeded from seed_data.py on first use.
+    help-docs: Markdown files in the private Supabase Storage bucket
+    HELP_DOCS_SUPABASE_BUCKET/HELP_DOCS_SUPABASE_PREFIX (uploaded by
+    amcp-platform-clients/scripts/sync-help-docs-to-supabase.mjs), read here with
+    the service role key -- the same server-side pattern as the model artifacts.
+    Falls back to the seeded record_store list if Storage isn't configured.
   - settings / profile: per signed-in user (keyed by the JWT `sub`).
 
 Routes are registered both unversioned (what the client calls today) and
 under /v1.
 """
 
+import json
+import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -30,6 +37,8 @@ from auth import require_auth
 from seed_data import DEFAULT_SETTINGS
 
 AlertsFn = Callable[[int, Optional[str]], Awaitable[List[Dict[str, Any]]]]
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -168,6 +177,82 @@ def _stored_list(collection: str) -> Callable[..., Awaitable[List[Dict[str, Any]
     return handler
 
 
+# --- Help docs (Supabase Storage, served through the API) ---------------------
+
+
+def _docs_object_url(file_name: str) -> str:
+    base = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    bucket = os.environ.get("HELP_DOCS_SUPABASE_BUCKET", "client-docs").strip("/")
+    prefix = os.environ.get("HELP_DOCS_SUPABASE_PREFIX", "help").strip("/")
+    path = f"{prefix}/{file_name}" if prefix else file_name
+    return f"{base}/storage/v1/object/{bucket}/{path}"
+
+
+async def _fetch_doc_object(file_name: str) -> Optional[bytes]:
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not (os.environ.get("SUPABASE_URL") and key and _http is not None):
+        return None
+    try:
+        resp = await _http.get(
+            _docs_object_url(file_name), headers={"Authorization": f"Bearer {key}", "apikey": key}, timeout=15
+        )
+        resp.raise_for_status()
+        return resp.content
+    except Exception as exc:  # noqa: BLE001 - caller falls back / 404s
+        logger.warning("could not fetch help doc '%s' from Supabase Storage: %s", file_name, exc)
+        return None
+
+
+async def _help_manifest() -> Optional[List[Dict[str, Any]]]:
+    raw = await _fetch_doc_object("manifest.json")
+    if raw is None:
+        return None
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        return None
+    return entries if isinstance(entries, list) else None
+
+
+async def list_help_docs(user: Dict[str, Any] = Depends(require_auth)) -> List[Dict[str, Any]]:
+    manifest = await _help_manifest()
+    if manifest is None:
+        return await record_store.list_seeded("help-docs")
+    return [
+        {
+            "id": e["id"],
+            "title": e.get("title", ""),
+            "category": e.get("category", ""),
+            "summary": e.get("summary", ""),
+            "url": f"/help-docs/{e['id']}",
+            "source": "api",
+        }
+        for e in manifest
+        if isinstance(e, dict) and e.get("id")
+    ]
+
+
+async def get_help_doc(doc_id: str, user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
+    manifest = await _help_manifest() or []
+    entry = next((e for e in manifest if isinstance(e, dict) and e.get("id") == doc_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown help doc '{doc_id}'")
+    # fileName comes from our own manifest, but never allow path traversal out of the prefix.
+    file_name = os.path.basename(str(entry.get("fileName", "")))
+    raw = await _fetch_doc_object(file_name) if file_name else None
+    if raw is None:
+        raise HTTPException(status_code=404, detail=f"help doc '{doc_id}' content unavailable")
+    return {
+        "id": entry["id"],
+        "title": entry.get("title", ""),
+        "category": entry.get("category", ""),
+        "summary": entry.get("summary", ""),
+        "url": f"/help-docs/{entry['id']}",
+        "source": "api",
+        "content": raw.decode("utf-8", errors="replace"),
+    }
+
+
 class AutomationStatusBody(BaseModel):
     status: str
 
@@ -230,7 +315,8 @@ _ROUTES = [
     ("/automations/{automation_id}/status", toggle_automation, ["POST"]),
     ("/reports", _stored_list("reports"), ["GET"]),
     ("/notifications", _stored_list("notifications"), ["GET"]),
-    ("/help-docs", _stored_list("help-docs"), ["GET"]),
+    ("/help-docs", list_help_docs, ["GET"]),
+    ("/help-docs/{doc_id}", get_help_doc, ["GET"]),
     ("/profile", get_profile, ["GET"]),
     ("/settings", get_settings, ["GET"]),
     ("/settings", save_settings, ["PUT"]),
