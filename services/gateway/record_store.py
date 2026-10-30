@@ -81,6 +81,23 @@ async def put(collection: str, record_id: str, data: Dict[str, Any], owner: str 
         logger.warning("failed to write %s/%s to DB (kept in memory): %s", collection, record_id, exc)
 
 
+async def delete(collection: str, record_id: str, owner: str = "") -> None:
+    _mem.get((collection, owner), {}).pop(record_id, None)
+    pool = _db()
+    if pool is None:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "delete from platform_records where collection = $1 and owner = $2 and id = $3",
+                collection,
+                owner,
+                record_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to delete %s/%s from DB: %s", collection, record_id, exc)
+
+
 async def list_all(collection: str, owner: str = "") -> List[Dict[str, Any]]:
     pool = _db()
     if pool is not None:

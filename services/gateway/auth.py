@@ -23,11 +23,12 @@ Setup:
 """
 
 import os
+import time
 from typing import Any, Dict, Optional
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 
 load_dotenv()  # picks up amcp-platform-services/.env when running outside Docker
 
@@ -86,10 +87,33 @@ async def require_auth(authorization: Optional[str] = Header(default=None)) -> D
     }
 
 
-async def require_admin(user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
+_denied_recently: Dict[str, float] = {}
+_DENIED_LOG_INTERVAL = 60.0  # one security event per actor+route per minute, so a retry loop can't flood the log
+
+
+async def _log_denied(user: Dict[str, Any], path: str) -> None:
+    """Record a non-admin hitting an admin route. Never lets a logging problem change the 403."""
+    key = f"{user.get('sub')}:{path}"
+    now = time.monotonic()
+    if now - _denied_recently.get(key, -_DENIED_LOG_INTERVAL) < _DENIED_LOG_INTERVAL:
+        return
+    _denied_recently[key] = now
+    try:
+        import audit_log  # local import: audit_log -> record_store -> alert_store, none of which import auth
+
+        await audit_log.record_security(f"admin access denied: {path}", "high", user)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def require_admin(
+    user: Dict[str, Any] = Depends(require_auth), request: Request = None  # type: ignore[assignment]
+) -> Dict[str, Any]:
     """FastAPI dependency: only accounts with app_metadata.role == "admin" (set server-side, not user-editable)."""
     if AUTH_DISABLED:
         return user
     if user.get("app_role") != "admin":
+        if request is not None:  # None when called directly (e.g. unit tests)
+            await _log_denied(user, request.url.path)
         raise HTTPException(status_code=403, detail="admin role required")
     return user

@@ -41,6 +41,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 import admin_api
+import admin_platform
 import alert_store
 import platform_api
 import record_store
@@ -194,6 +195,18 @@ app.include_router(platform_api.router)
 admin_api.configure(_http)
 app.include_router(admin_api.router)
 app.include_router(admin_api.router, prefix="/v1")
+
+# Admin console surface: domains, models, policies, integrations, metrics, audit log, settings (admin_platform.py)
+admin_platform.configure(
+    _http,
+    _recent_alerts,
+    DOMAIN_SERVICES,
+    INFERENCE_URL,
+    ALERTS_SUBJECT,
+    lambda: _nats_client is not None,
+    lambda: alert_store._pool is not None,
+)
+app.include_router(admin_platform.router)
 
 
 async def _connect_nats() -> None:

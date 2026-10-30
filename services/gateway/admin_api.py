@@ -11,6 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import audit_log
 from auth import require_admin
 
 router = APIRouter()
@@ -89,7 +90,7 @@ async def list_users(_: Dict[str, Any] = Depends(require_admin)) -> List[Dict[st
 
 
 @router.post("/admin/users", status_code=201)
-async def create_user(body: CreateUser, _: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+async def create_user(body: CreateUser, admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
     user = await _call(
         "POST",
         "/users",
@@ -101,16 +102,21 @@ async def create_user(body: CreateUser, _: Dict[str, Any] = Depends(require_admi
             "app_metadata": {"role": body.role},
         },
     )
+    await audit_log.record(admin, f"created {body.role} user", body.email)
     return _to_admin_user(user)
 
 
 @router.post("/admin/users/{user_id}/status")
 async def set_user_status(
-    user_id: str, body: SetStatus, _: Dict[str, Any] = Depends(require_admin)
+    user_id: str, body: SetStatus, admin: Dict[str, Any] = Depends(require_admin)
 ) -> Dict[str, Any]:
     user = await _call(
         "PUT",
         f"/users/{user_id}",
         json={"ban_duration": _BAN if body.status == "suspended" else "none"},
     )
-    return _to_admin_user(user)
+    result = _to_admin_user(user)
+    await audit_log.record(admin, f"set user {body.status}", result["email"] or user_id)
+    if body.status == "suspended":
+        await audit_log.record_security("user suspended", "medium", admin)
+    return result
