@@ -115,6 +115,44 @@ def test_seeded_collections(client, path, n):
     assert len(client.get(path, headers=tok()).json()) == n
 
 
+def _mock_docs_storage(monkeypatch, seen=None):
+    files = {
+        "manifest.json": b'[{"id":"doc-1","title":"T","category":"C","summary":"S","fileName":"a.md"}]',
+        "a.md": b"# Hello",
+    }
+
+    def handler(request):
+        if seen is not None:
+            seen.append(request)
+        name = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, content=files[name]) if name in files else httpx.Response(404)
+
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    mock_inference(monkeypatch, handler)
+
+
+def test_help_docs_listed_from_storage_via_api(client, monkeypatch):
+    seen = []
+    _mock_docs_storage(monkeypatch, seen)
+    docs = client.get("/help-docs", headers=tok()).json()
+    assert docs == [{"id": "doc-1", "title": "T", "category": "C", "summary": "S",
+                     "url": "/help-docs/doc-1", "source": "api"}]
+    assert seen[0].url.path == "/storage/v1/object/client-docs/help/manifest.json"
+    assert seen[0].headers["authorization"] == "Bearer svc"
+
+
+def test_help_doc_content_served_by_api(client, monkeypatch):
+    _mock_docs_storage(monkeypatch)
+    doc = client.get("/help-docs/doc-1", headers=tok()).json()
+    assert doc["content"] == "# Hello" and doc["title"] == "T"
+    assert client.get("/help-docs/nope", headers=tok()).status_code == 404
+
+
+def test_help_docs_require_auth(client):
+    assert client.get("/help-docs/doc-1").status_code == 401
+
+
 def test_toggle_automation(client):
     r = client.post("/automations/au-7001/status", headers=tok(), json={"status": "disabled"})
     assert r.json()["status"] == "disabled"
