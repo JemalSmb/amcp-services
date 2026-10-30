@@ -34,6 +34,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+import audit_log
 import record_store
 from auth import require_auth
 from seed_data import DEFAULT_SETTINGS
@@ -270,6 +271,7 @@ async def toggle_automation(
         raise HTTPException(status_code=404, detail=f"unknown automation '{automation_id}'")
     playbook["status"] = body.status
     await record_store.put("automations", automation_id, playbook)
+    await audit_log.record(user, f"set automation {body.status}", playbook.get("name", automation_id))
     return playbook
 
 

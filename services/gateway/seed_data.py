@@ -34,6 +34,17 @@ SEEDS: Dict[str, List[Dict[str, Any]]] = {
         {"id": "no-9002", "message": 'Automation "Lock account on credential stuffing" ran successfully', "read": False, "createdAt": "2026-09-16T08:06:35Z"},
         {"id": "no-9003", "message": "Weekly report generated", "read": True, "createdAt": "2026-09-15T06:01:00Z"},
     ],
+    "domains": [
+        {"id": "dm-cybersecurity", "name": "cybersecurity", "state": "active", "modelCount": 0, "description": "Threat detection, phishing and anomaly detection."},
+        {"id": "dm-finance", "name": "finance", "state": "active", "modelCount": 0, "description": "Fraud and transaction anomaly detection."},
+        {"id": "dm-manufacturing", "name": "manufacturing", "state": "active", "modelCount": 0, "description": "Process anomaly detection for production lines."},
+        {"id": "dm-agriculture", "name": "agriculture", "state": "planned", "modelCount": 0, "description": "Planned: crop and yield monitoring."},
+    ],
+    "policies": [
+        {"id": "po-1001", "name": "Escalate critical alerts", "domain": "cybersecurity", "type": "escalation", "enforcement": "enforced", "updatedAt": "2026-09-01T00:00:00Z"},
+        {"id": "po-1002", "name": "Review high fraud scores before freezing", "domain": "finance", "type": "automated-response", "enforcement": "monitor", "updatedAt": "2026-09-01T00:00:00Z"},
+        {"id": "po-1003", "name": "Flag process drift for maintenance", "domain": "manufacturing", "type": "notification", "enforcement": "monitor", "updatedAt": "2026-09-01T00:00:00Z"},
+    ],
     "help-docs": [
         {"id": "hd-1", "title": "Getting started with the dashboard", "category": "Basics", "summary": "Overview of the model status, alerts, and predictions views."},
         {"id": "hd-2", "title": "Understanding alert severity", "category": "Alerts", "summary": "How severity levels are assigned and what they mean."},
@@ -49,4 +60,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "alertSeverityThreshold": "medium",
     "browserNotifications": False,
     "refreshIntervalSeconds": 30,
+}
+
+DEFAULT_ADMIN_SETTINGS: Dict[str, Any] = {
+    "platformName": "AMCP Platform",
+    "maintenanceMode": False,
+    "dataRetentionDays": 90,
+    "defaultAlertSeverity": "medium",
 }
