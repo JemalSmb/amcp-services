@@ -235,3 +235,102 @@ def test_overview(env, monkeypatch):
     o = client.get("/admin/overview", headers=tok()).json()
     assert o == {"activeDomains": 3, "totalModels": 3, "healthyModels": 1, "activeUsers": 1,
                  "openSecurityEvents": 1, "runningDeployments": 4}
+
+
+# --- denied admin access is recorded -----------------------------------------------------------
+def test_denied_admin_access_is_logged_once_per_minute(env, monkeypatch):
+    client, _ = env
+    monkeypatch.setattr(auth, "_denied_recently", {})
+    viewer = tok(sub="v1", email="viewer@corp.io", role="viewer")
+    for _ in range(3):
+        assert client.get("/policies", headers=viewer).status_code == 403
+    assert client.get("/audit-log", headers=viewer).status_code == 403
+    events = client.get("/security/events", headers=tok()).json()
+    denied = [e for e in events if e["type"].startswith("admin access denied")]
+    assert sorted(e["type"] for e in denied) == ["admin access denied: /audit-log", "admin access denied: /policies"]
+    assert all(e["severity"] == "high" and e["actor"] == "viewer@corp.io" for e in denied)
+
+
+def test_denied_logging_failure_does_not_change_the_403(env, monkeypatch):
+    client, _ = env
+    monkeypatch.setattr(auth, "_denied_recently", {})
+
+    async def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(audit_log, "record_security", boom)
+    assert client.get("/policies", headers=tok(role="viewer")).status_code == 403
+
+
+# --- policy and domain management --------------------------------------------------------------
+POLICY = {"name": "  Block bad IPs ", "domain": "cybersecurity", "type": "response", "enforcement": "monitor"}
+
+
+def test_policy_create_update_delete_with_audit(env):
+    client, _ = env
+    h = tok()
+    created = client.post("/policies", headers=h, json=POLICY)
+    assert created.status_code == 201 and created.json()["name"] == "Block bad IPs"
+    pid = created.json()["id"]
+    assert len(client.get("/policies", headers=h).json()) == 4  # 3 seeded + 1
+
+    updated = client.put(f"/policies/{pid}", headers=h, json={**POLICY, "enforcement": "disabled"}).json()
+    assert updated["enforcement"] == "disabled" and updated["updatedAt"] >= created.json()["updatedAt"]
+    assert client.delete(f"/policies/{pid}", headers=h).status_code == 204
+    assert pid not in [p["id"] for p in client.get("/policies", headers=h).json()]
+
+    actions = [e["action"] for e in client.get("/audit-log", headers=h).json()]
+    assert actions == ["deleted policy", "updated policy", "created policy"]
+    types = [e["type"] for e in client.get("/security/events", headers=h).json()]
+    assert "policy disabled" in types and "policy deleted" in types
+
+
+def test_seeded_policies_can_be_edited(env):
+    client, _ = env
+    h = tok()
+    first = client.get("/policies", headers=h).json()[0]
+    r = client.put(f"/policies/{first['id']}", headers=h, json={"name": "Renamed", "domain": first["domain"],
+                                                                 "type": first["type"], "enforcement": "enforced"})
+    assert r.status_code == 200 and r.json()["name"] == "Renamed"
+
+
+@pytest.mark.parametrize("bad", [
+    {**POLICY, "name": "  "}, {**POLICY, "domain": "moon"}, {**POLICY, "enforcement": "sometimes"},
+    {**POLICY, "type": ""}, {**POLICY, "name": "x" * 121},
+])
+def test_policy_validation(env, bad):
+    client, _ = env
+    assert client.post("/policies", headers=tok(), json=bad).status_code == 422
+    assert len(client.get("/policies", headers=tok()).json()) == 3
+
+
+def test_policy_unknown_id_404_and_non_admin_403(env):
+    client, _ = env
+    assert client.put("/policies/nope", headers=tok(), json=POLICY).status_code == 404
+    assert client.delete("/policies/nope", headers=tok()).status_code == 404
+    viewer = tok(role="viewer")
+    assert client.post("/policies", headers=viewer, json=POLICY).status_code == 403
+    assert client.delete("/policies/po-1001", headers=viewer).status_code == 403
+    assert len(client.get("/policies", headers=tok()).json()) == 3
+
+
+def test_domain_state_change_audited_and_affects_admin_views(env):
+    client, state = env
+    h = tok()
+    r = client.put("/domains/dm-agriculture", headers=h, json={"state": "active", "description": " Crop monitoring "})
+    assert r.status_code == 200 and r.json()["state"] == "active" and r.json()["description"] == "Crop monitoring"
+    assert "agriculture" in [d["domain"] for d in client.get("/data-sources", headers=h).json()]
+
+    client.put("/domains/dm-finance", headers=h, json={"state": "inactive"})
+    assert "finance" not in [d["domain"] for d in client.get("/data-sources", headers=h).json()]
+    assert client.get("/admin/overview", headers=h).json()["activeDomains"] == 3  # +agriculture, -finance
+    log = [e["action"] for e in client.get("/audit-log", headers=h).json()]
+    assert log == ["set domain inactive", "set domain active"]
+    assert "domain deactivated" in [e["type"] for e in client.get("/security/events", headers=h).json()]
+
+
+def test_domain_validation_and_unknown(env):
+    client, _ = env
+    assert client.put("/domains/dm-finance", headers=tok(), json={"state": "exploded"}).status_code == 422
+    assert client.put("/domains/nope", headers=tok(), json={"state": "active"}).status_code == 404
+    assert client.put("/domains/dm-finance", headers=tok(role="viewer"), json={"state": "inactive"}).status_code == 403

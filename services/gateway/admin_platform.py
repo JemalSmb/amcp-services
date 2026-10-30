@@ -14,6 +14,7 @@ Routes are registered both unversioned (what the admin client calls) and under /
 import asyncio
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
@@ -146,8 +147,86 @@ async def list_domains(_: Dict[str, Any] = Depends(require_admin)) -> List[Dict[
     return [{**d, "modelCount": counts.get(d["name"], d.get("modelCount", 0))} for d in domains]
 
 
+PlatformDomain = Literal["cybersecurity", "finance", "manufacturing", "agriculture"]
+
+
+class DomainUpdate(BaseModel):
+    state: Literal["active", "inactive", "planned"]
+    description: Optional[str] = Field(default=None, max_length=300)
+
+
+async def update_domain(
+    domain_id: str, body: DomainUpdate, admin: Dict[str, Any] = Depends(require_admin)
+) -> Dict[str, Any]:
+    await record_store.list_seeded("domains")
+    domain = await record_store.get("domains", domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail=f"unknown domain '{domain_id}'")
+    previous = domain["state"]
+    domain["state"] = body.state
+    if body.description is not None:
+        domain["description"] = body.description.strip()
+    await record_store.put("domains", domain_id, domain)
+    if previous != body.state:
+        await audit_log.record(admin, f"set domain {body.state}", domain["name"])
+        if body.state == "inactive":
+            await audit_log.record_security("domain deactivated", "medium", admin)
+    else:
+        await audit_log.record(admin, "updated domain", domain["name"])
+    counts = {d["id"]: d["modelCount"] for d in await list_domains(admin)}
+    return {**domain, "modelCount": counts.get(domain_id, 0)}
+
+
 async def list_policies(_: Dict[str, Any] = Depends(require_admin)) -> List[Dict[str, Any]]:
     return await record_store.list_seeded("policies")
+
+
+class PolicyBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    domain: PlatformDomain
+    type: str = Field(min_length=1, max_length=60)
+    enforcement: Literal["enforced", "monitor", "disabled"]
+
+    @field_validator("name", "type")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        return v
+
+
+async def create_policy(body: PolicyBody, admin: Dict[str, Any] = Depends(require_admin)) -> Dict[str, Any]:
+    await record_store.list_seeded("policies")
+    policy = {"id": f"po-{uuid.uuid4().hex[:8]}", **body.model_dump(), "updatedAt": _iso(_now())}
+    await record_store.put("policies", policy["id"], policy)
+    await audit_log.record(admin, "created policy", policy["name"])
+    return policy
+
+
+async def update_policy(
+    policy_id: str, body: PolicyBody, admin: Dict[str, Any] = Depends(require_admin)
+) -> Dict[str, Any]:
+    await record_store.list_seeded("policies")
+    current = await record_store.get("policies", policy_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"unknown policy '{policy_id}'")
+    policy = {**current, **body.model_dump(), "updatedAt": _iso(_now())}
+    await record_store.put("policies", policy_id, policy)
+    await audit_log.record(admin, "updated policy", policy["name"])
+    if current["enforcement"] != "disabled" and policy["enforcement"] == "disabled":
+        await audit_log.record_security("policy disabled", "medium", admin)
+    return policy
+
+
+async def delete_policy(policy_id: str, admin: Dict[str, Any] = Depends(require_admin)) -> None:
+    await record_store.list_seeded("policies")
+    current = await record_store.get("policies", policy_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"unknown policy '{policy_id}'")
+    await record_store.delete("policies", policy_id)
+    await audit_log.record(admin, "deleted policy", current["name"])
+    await audit_log.record_security("policy deleted", "medium", admin)
 
 
 # --- Alert-stream derived ---------------------------------------------------------------------
@@ -365,8 +444,12 @@ async def save_system_settings(
 _ROUTES = [
     ("/admin/overview", overview, ["GET"]),
     ("/domains", list_domains, ["GET"]),
+    ("/domains/{domain_id}", update_domain, ["PUT"]),
     ("/admin/models", list_models, ["GET"]),
     ("/policies", list_policies, ["GET"]),
+    ("/policies", create_policy, ["POST"], 201),
+    ("/policies/{policy_id}", update_policy, ["PUT"]),
+    ("/policies/{policy_id}", delete_policy, ["DELETE"], 204),
     ("/messaging/channels", list_channels, ["GET"]),
     ("/integrations", list_integrations, ["GET"]),
     ("/data-sources", list_data_sources, ["GET"]),
@@ -378,6 +461,8 @@ _ROUTES = [
     ("/admin/settings", save_system_settings, ["PUT"]),
 ]
 
-for _path, _handler, _methods in _ROUTES:
-    router.add_api_route(_path, _handler, methods=_methods)
-    router.add_api_route(f"/v1{_path}", _handler, methods=_methods, include_in_schema=False)
+for _path, _handler, _methods, *_status in _ROUTES:
+    router.add_api_route(_path, _handler, methods=_methods, status_code=_status[0] if _status else 200)
+    router.add_api_route(
+        f"/v1{_path}", _handler, methods=_methods, include_in_schema=False, status_code=_status[0] if _status else 200
+    )
